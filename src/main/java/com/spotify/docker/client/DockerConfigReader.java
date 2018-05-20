@@ -164,11 +164,11 @@ public class DockerConfigReader {
         }
       }
       return RegistryConfigs.create(registryAuthMap);
-
     } else if (authJson.has(AUTHS_ENTRY)) {
-      authJson = (ObjectNode)authJson.get(AUTHS_ENTRY);
+      return MAPPER.treeToValue(authJson.get(AUTHS_ENTRY), RegistryConfigs.class);
     }
-    return MAPPER.treeToValue(authJson, RegistryConfigs.class);
+
+    return RegistryConfigs.empty();
   }
 
   public Path defaultConfigPath() {
