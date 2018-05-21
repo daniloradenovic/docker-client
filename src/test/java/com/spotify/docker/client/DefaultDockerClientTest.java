@@ -85,6 +85,7 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.isEmptyOrNullString;
+import static org.hamcrest.Matchers.isEmptyString;
 import static org.hamcrest.Matchers.isIn;
 import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
@@ -5604,6 +5605,39 @@ public class DefaultDockerClientTest {
       assertThat(tmpfsOptions.sizeBytes(), equalTo(expectedSizeBytes));
       assertThat(tmpfsOptions.mode(), equalTo(expectedMode));
     }
+  }
+
+  @Test
+  public void testReadingStdout() throws DockerException, InterruptedException {
+
+    // pull image
+    sut.pull(BUSYBOX_LATEST);
+
+    // create container
+    final ContainerConfig config = ContainerConfig.builder()
+        .image(BUSYBOX_LATEST)
+        .cmd("echo", "helloworld")
+        .build();
+
+    final ContainerCreation creation = sut.createContainer(config, randomName());
+    String id = creation.id();
+
+    // start and wait to finish
+    sut.startContainer(id);
+    sut.waitContainer(id);
+
+    // LogStream.readFully() can (falsely) return an empty String in ~0.1% of
+    // the cases, therefore a higher number of attempts
+    for (int i = 0; i < 10000; i++) {
+      LogStream logStream = sut.logs(id, DockerClient.LogsParam.stdout());
+      String result = logStream.readFully();
+      System.out.println(i + "-" + result);
+      logStream.close();
+      assertThat(result, not(isEmptyString()));;
+    }
+
+    // cleanup
+    sut.removeContainer(id);
   }
 
   private ServiceSpec createServiceSpec(final String serviceName) {
