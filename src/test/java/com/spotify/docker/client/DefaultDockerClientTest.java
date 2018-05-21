@@ -5608,7 +5608,7 @@ public class DefaultDockerClientTest {
   }
 
   @Test
-  public void testReadingStdout() throws DockerException, InterruptedException {
+  public void testReadStdout() throws DockerException, InterruptedException {
 
     // pull image
     sut.pull(BUSYBOX_LATEST);
@@ -5631,7 +5631,6 @@ public class DefaultDockerClientTest {
     for (int i = 0; i < 10000; i++) {
       LogStream logStream = sut.logs(id, DockerClient.LogsParam.stdout());
       String result = logStream.readFully();
-      System.out.println(i + "-" + result);
       logStream.close();
       assertThat(result, not(isEmptyString()));;
     }
