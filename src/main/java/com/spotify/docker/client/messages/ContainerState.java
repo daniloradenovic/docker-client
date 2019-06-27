@@ -56,7 +56,7 @@ public abstract class ContainerState {
   public abstract Integer pid();
 
   @JsonProperty("ExitCode")
-  public abstract Integer exitCode();
+  public abstract Long exitCode();
 
   @JsonProperty("StartedAt")
   public abstract Date startedAt();
@@ -83,7 +83,7 @@ public abstract class ContainerState {
       @JsonProperty("Paused") final Boolean addr,
       @JsonProperty("Restarting") final Boolean restarting,
       @JsonProperty("Pid") final Integer pid,
-      @JsonProperty("ExitCode") final Integer exitCode,
+      @JsonProperty("ExitCode") final Long exitCode,
       @JsonProperty("StartedAt") final Date startedAt,
       @JsonProperty("FinishedAt") final Date finishedAt,
       @JsonProperty("Error") final String error,
@@ -103,7 +103,7 @@ public abstract class ContainerState {
     public abstract Date end();
 
     @JsonProperty("ExitCode")
-    public abstract Integer exitCode();
+    public abstract Long exitCode();
 
     @JsonProperty("Output")
     public abstract String output();
@@ -112,7 +112,7 @@ public abstract class ContainerState {
     static HealthLog create(
         @JsonProperty("Start") final Date start,
         @JsonProperty("End") final Date end,
-        @JsonProperty("ExitCode") final Integer exitCode,
+        @JsonProperty("ExitCode") final Long exitCode,
         @JsonProperty("Output") final String output) {
       return new AutoValue_ContainerState_HealthLog(start, end, exitCode, output);
     }

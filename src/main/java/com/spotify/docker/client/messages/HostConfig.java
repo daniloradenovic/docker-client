@@ -114,7 +114,11 @@ public abstract class HostConfig {
   @Nullable
   @JsonProperty("ExtraHosts")
   public abstract ImmutableList<String> extraHosts();
-
+  
+  @Nullable
+  @JsonProperty("GroupAdd")
+  public abstract ImmutableList<String> groupAdd();
+  
   @Nullable
   @JsonProperty("VolumesFrom")
   public abstract ImmutableList<String> volumesFrom();
@@ -146,6 +150,10 @@ public abstract class HostConfig {
   @Nullable
   @JsonProperty("MemorySwap")
   public abstract Long memorySwap();
+
+  @Nullable
+  @JsonProperty("KernelMemory")
+  public abstract Long kernelMemory();
 
   @Nullable
   @JsonProperty("MemorySwappiness")
@@ -240,6 +248,11 @@ public abstract class HostConfig {
   @JsonProperty("StorageOpt")
   public abstract ImmutableMap<String, String> storageOpt();
 
+  @Nullable
+  @JsonProperty("Runtime")
+  public abstract String runtime();
+
+
   @JsonCreator
   static HostConfig create(
       @JsonProperty("Binds") final List<String> binds,
@@ -259,6 +272,7 @@ public abstract class HostConfig {
       @JsonProperty("DnsOptions") final List<String> dnsOptions,
       @JsonProperty("DnsSearch") final List<String> dnsSearch,
       @JsonProperty("ExtraHosts") final List<String> extraHosts,
+      @JsonProperty("GroupAdd") final List<String> groupAdd,
       @JsonProperty("VolumesFrom") final List<String> volumesFrom,
       @JsonProperty("CapAdd") final List<String> capAdd,
       @JsonProperty("CapDrop") final List<String> capDrop,
@@ -269,6 +283,7 @@ public abstract class HostConfig {
       @JsonProperty("MemorySwap") final Long memorySwap,
       @JsonProperty("MemorySwappiness") final Integer memorySwappiness,
       @JsonProperty("MemoryReservation") final Long memoryReservation,
+      @JsonProperty("KernelMemory") final Long kernelMemory,
       @JsonProperty("NanoCpus") final Long nanoCpus,
       @JsonProperty("CpuPeriod") final Long cpuPeriod,
       @JsonProperty("CpuShares") final Long cpuShares,
@@ -288,6 +303,7 @@ public abstract class HostConfig {
       @JsonProperty("PidsLimit") final Integer pidsLimit,
       @JsonProperty("Tmpfs") final Map<String, String> tmpfs,
       @JsonProperty("ReadonlyRootfs") final Boolean readonlyRootfs,
+      @JsonProperty("Runtime") final String runtime,
       @JsonProperty("StorageOpt") final Map<String, String> storageOpt) {
     return builder()
         .binds(binds)
@@ -307,6 +323,7 @@ public abstract class HostConfig {
         .dnsOptions(dnsOptions)
         .dnsSearch(dnsSearch)
         .extraHosts(extraHosts)
+        .groupAdd( groupAdd )
         .volumesFrom(volumesFrom)
         .capAdd(capAdd)
         .capDrop(capDrop)
@@ -317,6 +334,7 @@ public abstract class HostConfig {
         .memorySwap(memorySwap)
         .memorySwappiness(memorySwappiness)
         .memoryReservation(memoryReservation)
+        .kernelMemory(kernelMemory)
         .nanoCpus(nanoCpus)
         .cpuPeriod(cpuPeriod)
         .cpuShares(cpuShares)
@@ -337,6 +355,7 @@ public abstract class HostConfig {
         .tmpfs(tmpfs)
         .readonlyRootfs(readonlyRootfs)
         .storageOpt(storageOpt)
+        .runtime(runtime)
         .build();
   }
 
@@ -535,6 +554,10 @@ public abstract class HostConfig {
     public abstract Builder extraHosts(List<String> extraHosts);
 
     public abstract Builder extraHosts(String... extraHosts);
+    
+    public abstract Builder groupAdd(List<String> groupAdd);
+
+    public abstract Builder groupAdd(String... groupAdd);
 
     public abstract Builder volumesFrom(List<String> volumesFrom);
 
@@ -563,6 +586,8 @@ public abstract class HostConfig {
     public abstract Builder memorySwap(Long memorySwap);
 
     public abstract Builder memorySwappiness(Integer memorySwappiness);
+
+    public abstract Builder kernelMemory(Long kernelMemory);
 
     public abstract Builder memoryReservation(Long memoryReservation);
 
@@ -635,6 +660,8 @@ public abstract class HostConfig {
     public abstract Builder readonlyRootfs(Boolean readonlyRootfs);
     
     public abstract Builder storageOpt(Map<String, String> tmpfs);
+
+    public abstract Builder runtime(String runtime);
 
     // Validation of property values using AutoValue requires we split the build method into two.
     // AutoValue implements this package-private method.

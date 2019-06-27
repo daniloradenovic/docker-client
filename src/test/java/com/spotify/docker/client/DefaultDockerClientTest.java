@@ -107,14 +107,11 @@ import static org.junit.Assume.assumeTrue;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.util.StdDateFormat;
-import com.google.common.base.Function;
-import com.google.common.base.Predicate;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Collections2;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Sets;
 import com.google.common.io.Resources;
@@ -137,6 +134,7 @@ import com.spotify.docker.client.exceptions.ImageNotFoundException;
 import com.spotify.docker.client.exceptions.ImagePushFailedException;
 import com.spotify.docker.client.exceptions.NetworkNotFoundException;
 import com.spotify.docker.client.exceptions.NotFoundException;
+import com.spotify.docker.client.exceptions.TaskNotFoundException;
 import com.spotify.docker.client.exceptions.UnsupportedApiVersionException;
 import com.spotify.docker.client.exceptions.VolumeNotFoundException;
 import com.spotify.docker.client.messages.AttachedNetwork;
@@ -203,7 +201,6 @@ import com.spotify.docker.client.messages.swarm.OrchestrationConfig;
 import com.spotify.docker.client.messages.swarm.Placement;
 import com.spotify.docker.client.messages.swarm.PortConfig;
 import com.spotify.docker.client.messages.swarm.PortConfig.PortConfigPublishMode;
-import com.spotify.docker.client.messages.swarm.Preference;
 import com.spotify.docker.client.messages.swarm.RaftConfig;
 import com.spotify.docker.client.messages.swarm.ReplicatedService;
 import com.spotify.docker.client.messages.swarm.ResourceRequirements;
@@ -216,7 +213,6 @@ import com.spotify.docker.client.messages.swarm.SecretSpec;
 import com.spotify.docker.client.messages.swarm.Service;
 import com.spotify.docker.client.messages.swarm.ServiceMode;
 import com.spotify.docker.client.messages.swarm.ServiceSpec;
-import com.spotify.docker.client.messages.swarm.Spread;
 import com.spotify.docker.client.messages.swarm.Swarm;
 import com.spotify.docker.client.messages.swarm.SwarmInit;
 import com.spotify.docker.client.messages.swarm.SwarmSpec;
@@ -241,6 +237,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -250,6 +247,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -265,7 +263,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
-import javax.annotation.Nullable;
+import java.util.stream.Collectors;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
@@ -307,7 +305,7 @@ public class DefaultDockerClientTest {
   private static final boolean TRAVIS = "true".equals(getenv("TRAVIS"));
 
   private static final String AUTH_USERNAME = "dxia2";
-  private static final String AUTH_PASSWORD = "Tv38KLPd]M";
+  private static final String AUTH_PASSWORD = System.getenv("HUB_DXIA2_PASSWORD");
 
   private static final Logger log = LoggerFactory.getLogger(DefaultDockerClientTest.class);
 
@@ -446,6 +444,49 @@ public class DefaultDockerClientTest {
     sut.pull(BUSYBOX_BUILDROOT_2013_08_1);
   }
 
+  @SuppressWarnings("emptyCatchBlock")
+  @Test
+  public void testPullInterruption() throws Exception {
+    // Wait for container on a thread
+    final ExecutorService executorService = Executors.newSingleThreadExecutor();
+    final SettableFuture<Boolean> started = SettableFuture.create();
+    final SettableFuture<Boolean> interrupted = SettableFuture.create();
+
+    final Future<?> exitFuture = executorService.submit(new Callable<ContainerExit>() {
+      @Override
+      public ContainerExit call() throws Exception {
+        try {
+          try {
+            sut.removeImage(BUSYBOX_BUILDROOT_2013_08_1);
+          } catch (DockerException ignored) {
+          }
+          sut.pull(BUSYBOX_BUILDROOT_2013_08_1, message -> {
+            if (!started.isDone()) {
+              started.set(true);
+            }
+          });
+          return null;
+        } catch (InterruptedException e) {
+          interrupted.set(true);
+          throw e;
+        }
+      }
+    });
+
+    // Interrupt waiting thread
+    started.get();
+    executorService.shutdownNow();
+    try {
+      exitFuture.get();
+      fail();
+    } catch (ExecutionException e) {
+      assertThat(e.getCause(), instanceOf(InterruptedException.class));
+    }
+
+    // Verify that the thread was interrupted
+    assertThat(interrupted.get(), is(true));
+  }
+
   @Test(expected = ImageNotFoundException.class)
   public void testPullBadImage() throws Exception {
     // The Docker daemon on CircleCI won't throw ImageNotFoundException for some reason...
@@ -458,7 +499,7 @@ public class DefaultDockerClientTest {
     sut.pull(CIRROS_PRIVATE_LATEST);
   }
   
-  private static final Path getResource(String name) throws URISyntaxException {
+  private static Path getResource(String name) throws URISyntaxException {
     // Resources.getResources(...).getPath() does not work correctly on windows,
     // hence this workaround.  See: https://github.com/spotify/docker-client/pull/780
     // for details
@@ -579,12 +620,7 @@ public class DefaultDockerClientTest {
 
     final Set<String> loadedImages;
     try (InputStream imageFileInputStream = new FileInputStream(imagesFile)) {
-      loadedImages = sut.load(imageFileInputStream, new ProgressHandler() {
-        @Override
-        public void progress(ProgressMessage message) throws DockerException {
-            messages.add(message);
-        }
-      });
+      loadedImages = sut.load(imageFileInputStream, messages::add);
     }
 
     if (dockerApiVersionAtLeast("1.24")) {
@@ -651,12 +687,8 @@ public class DefaultDockerClientTest {
       sut.create(image, imagePayload);
     }
 
-    final Collection<Image> images = Collections2.filter(sut.listImages(), new Predicate<Image>() {
-      @Override
-      public boolean apply(final Image img) {
-        return img.repoTags() != null && img.repoTags().contains(image + ":latest");
-      }
-    });
+    final Collection<Image> images = Collections2.filter(sut.listImages(),
+        img -> img.repoTags() != null && img.repoTags().contains(image + ":latest"));
 
     assertThat(images.size(), greaterThan(0));
 
@@ -688,6 +720,9 @@ public class DefaultDockerClientTest {
 
   @Test
   public void testAuth() throws Exception {
+    // The Docker Hub password is stored encrypted in Travis. So only run on Travis.
+    assumeTrue(TRAVIS);
+
     final int statusCode = sut.auth(registryAuth);
     assertThat(statusCode, equalTo(200));
   }
@@ -904,16 +939,12 @@ public class DefaultDockerClientTest {
     final Path dockerDirectory = getResource("dockerDirectory");
     final AtomicReference<String> imageIdFromMessage = new AtomicReference<>();
 
-    final String returnedImageId = sut.build(dockerDirectory, "test", 
-        new ProgressHandler() {
-          @Override
-          public void progress(ProgressMessage message) throws DockerException {
-            final String imageId = message.buildImageId();
-            if (imageId != null) {
-              imageIdFromMessage.set(imageId);
-            }
-          }
-        });
+    final String returnedImageId = sut.build(dockerDirectory, "test", message -> {
+      final String imageId = message.buildImageId();
+      if (imageId != null) {
+        imageIdFromMessage.set(imageId);
+      }
+    });
 
     assertThat(returnedImageId, is(imageIdFromMessage.get()));
   }
@@ -923,15 +954,11 @@ public class DefaultDockerClientTest {
     final Path dockerDirectory = getResource("dockerDirectory");
     final AtomicReference<String> imageIdFromMessage = new AtomicReference<>();
 
-    final String returnedImageId = sut.build(
-        dockerDirectory, "test", "innerDir/innerDockerfile", 
-        new ProgressHandler() {
-          @Override
-          public void progress(ProgressMessage message) throws DockerException {
-            final String imageId = message.buildImageId();
-            if (imageId != null) {
-              imageIdFromMessage.set(imageId);
-            }
+    final String returnedImageId = sut.build(dockerDirectory, "test", "innerDir/innerDockerfile",
+        message -> {
+          final String imageId = message.buildImageId();
+          if (imageId != null) {
+            imageIdFromMessage.set(imageId);
           }
         });
 
@@ -940,6 +967,9 @@ public class DefaultDockerClientTest {
 
   @Test
   public void testBuildImageIdWithAuth() throws Exception {
+    // The Docker Hub password is stored encrypted in Travis. So only run on Travis.
+    assumeTrue(TRAVIS);
+
     final Path dockerDirectory = getResource("dockerDirectory");
     final AtomicReference<String> imageIdFromMessage = new AtomicReference<>();
 
@@ -952,16 +982,12 @@ public class DefaultDockerClientTest {
             registryAuth, RegistryConfigs.create(singletonMap("", registryAuth))))
         .build();
 
-    final String returnedImageId = sut2.build(dockerDirectory, "test", 
-        new ProgressHandler() {
-          @Override
-          public void progress(ProgressMessage message) throws DockerException {
-            final String imageId = message.buildImageId();
-            if (imageId != null) {
-              imageIdFromMessage.set(imageId);
-            }
-          }
-        });
+    final String returnedImageId = sut2.build(dockerDirectory, "test", message -> {
+      final String imageId = message.buildImageId();
+      if (imageId != null) {
+        imageIdFromMessage.set(imageId);
+      }
+    });
 
     assertThat(returnedImageId, is(imageIdFromMessage.get()));
   }
@@ -998,6 +1024,60 @@ public class DefaultDockerClientTest {
     assertThat(info.id(), startsWith(expectedId));
   }
 
+  @SuppressWarnings("emptyCatchBlock")
+  @Test
+  public void testBuildInterruption() throws Exception {
+    // Wait for container on a thread
+    final ExecutorService executorService = Executors.newSingleThreadExecutor();
+    final SettableFuture<Boolean> started = SettableFuture.create();
+    final SettableFuture<Boolean> interrupted = SettableFuture.create();
+
+    final String imageName = "test-build-name";
+    
+    final Future<?> buildFuture = executorService.submit((Callable<Void>) () -> {
+      try {
+        try {
+          sut.removeImage(imageName);
+        } catch (DockerException ignored) {
+        }
+        final URL dockerDirectoryUrl = Resources.getResource("dockerDirectorySleeping");
+        final Path dockerDirectory = Paths.get(dockerDirectoryUrl.toURI());
+
+        sut.build(dockerDirectory, imageName, message -> {
+          if (!started.isDone()) {
+            started.set(true);
+          }
+        });
+      } catch (InterruptedException e) {
+        interrupted.set(true);
+        throw e;
+      } catch (Throwable t) {
+        started.setException(t);
+        throw t;
+      }
+      return null;
+    });
+
+    // Interrupt waiting thread
+    started.get();
+    executorService.shutdownNow();
+    try {
+      buildFuture.get();
+      fail();
+    } catch (ExecutionException e) {
+      assertThat(e.getCause(), instanceOf(InterruptedException.class));
+    }
+
+    try {
+      sut.inspectImage(imageName);
+      fail();
+    } catch (ImageNotFoundException e) {
+    }
+    
+    // Verify that the thread was interrupted
+    assertThat(interrupted.get(), is(true));
+  }
+
   @Test
   public void testBuildWithPull() throws Exception {
     requireDockerApiVersionAtLeast("1.19", "build with pull");
@@ -1010,12 +1090,9 @@ public class DefaultDockerClientTest {
 
     // Build again with PULL set, and verify we pulled the base image
     final AtomicBoolean pulled = new AtomicBoolean(false);
-    sut.build(dockerDirectory, "test", new ProgressHandler() {
-      @Override
-      public void progress(ProgressMessage message) throws DockerException {
-        if (!isNullOrEmpty(message.status()) && message.status().contains(pullMsg)) {
-          pulled.set(true);
-        }
+    sut.build(dockerDirectory, "test", message -> {
+      if (!isNullOrEmpty(message.status()) && message.status().contains(pullMsg)) {
+        pulled.set(true);
       }
     }, BuildParam.pullNewerImage());
     assertTrue(pulled.get());
@@ -1031,23 +1108,16 @@ public class DefaultDockerClientTest {
 
     // Build again and make sure we used cached image by parsing output.
     final AtomicBoolean usedCache = new AtomicBoolean(false);
-    sut.build(dockerDirectory, "test", new ProgressHandler() {
-      @Override
-      public void progress(final ProgressMessage message) throws DockerException {
-        if (message.stream() != null && message.stream().contains(usingCache)) {
-          usedCache.set(true);
-        }
+    sut.build(dockerDirectory, "test", message -> {
+      if (message.stream() != null && message.stream().contains(usingCache)) {
+        usedCache.set(true);
       }
     });
     assertTrue(usedCache.get());
 
     // Build again with NO_CACHE set, and verify we don't use cache.
-    sut.build(dockerDirectory, "test", new ProgressHandler() {
-      @Override
-      public void progress(ProgressMessage message) throws DockerException {
-        assertThat(message.stream(), not(containsString(usingCache)));
-      }
-    }, BuildParam.noCache());
+    sut.build(dockerDirectory, "test", message ->
+        assertThat(message.stream(), not(containsString(usingCache))), BuildParam.noCache());
   }
 
   @Test
@@ -1058,23 +1128,17 @@ public class DefaultDockerClientTest {
     // Test that intermediate containers are removed with FORCE_RM by parsing output. We must
     // set NO_CACHE so that docker will generate some containers to remove.
     final AtomicBoolean removedContainer = new AtomicBoolean(false);
-    sut.build(dockerDirectory, "test", new ProgressHandler() {
-      @Override
-      public void progress(ProgressMessage message) throws DockerException {
-        if (containsIgnoreCase(message.stream(), removingContainers)) {
-          removedContainer.set(true);
-        }
+    sut.build(dockerDirectory, "test", message -> {
+      if (containsIgnoreCase(message.stream(), removingContainers)) {
+        removedContainer.set(true);
       }
     }, BuildParam.noCache(), BuildParam.forceRm());
     assertTrue(removedContainer.get());
 
     // Set NO_RM and verify we don't get message that containers were removed.
-    sut.build(dockerDirectory, "test", new ProgressHandler() {
-      @Override
-      public void progress(ProgressMessage message) throws DockerException {
-        assertThat(message.stream(), not(containsString(removingContainers)));
-      }
-    }, BuildParam.noCache(), BuildParam.rm(false));
+    sut.build(dockerDirectory, "test", message ->
+            assertThat(message.stream(), not(containsString(removingContainers))),
+        BuildParam.noCache(), BuildParam.rm(false));
   }
 
   @Test
@@ -1082,14 +1146,9 @@ public class DefaultDockerClientTest {
     // The Dockerfile specifies a sleep of 10s during the build
     // Returned image id is last piece of output, so this confirms stream did not timeout
     final Path dockerDirectory = getResource("dockerDirectorySleeping");
-    final String returnedImageId = sut.build(
-        dockerDirectory, "test", new ProgressHandler() {
-          @Override
-          public void progress(ProgressMessage message) throws DockerException {
-            log.info(message.stream());
-          }
-        }, BuildParam.noCache());
-    assertTrue(returnedImageId != null);
+    final String returnedImageId = sut.build(dockerDirectory, "test",
+        message -> log.info(message.stream()), BuildParam.noCache());
+    assertNotNull(returnedImageId);
   }
 
   @Test
@@ -1454,9 +1513,6 @@ public class DefaultDockerClientTest {
     final ContainerInfo containerInfo = sut.inspectContainer(containerId);
     assertThat(containerInfo.state().running(), equalTo(true));
 
-    final ContainerInfo tempContainerInfo = sut.inspectContainer(containerId);
-    final Integer originalPid = tempContainerInfo.state().pid();
-
     // kill with SIGKILL
     sut.killContainer(containerId, DockerClient.Signal.SIGKILL);
 
@@ -1529,7 +1585,7 @@ public class DefaultDockerClientTest {
       if (files != null) {
         for (final File file : files) {
           if (!file.isDirectory()) {
-            Boolean found = false;
+            boolean found = false;
             for (final String fileDownloaded : filesDownloaded.build()) {
               if (fileDownloaded.contains(file.getName())) {
                 found = true;
@@ -1683,12 +1739,7 @@ public class DefaultDockerClientTest {
       // Submit a bunch of waitContainer requests
       for (int i = 0; i < callableCount; i++) {
         //noinspection unchecked
-        completion.submit(new Callable<ContainerExit>() {
-          @Override
-          public ContainerExit call() throws Exception {
-            return dockerClient.waitContainer(id);
-          }
-        });
+        completion.submit(() -> dockerClient.waitContainer(id));
       }
 
       // Wait for the requests to complete or throw expected exception
@@ -1696,7 +1747,7 @@ public class DefaultDockerClientTest {
         try {
           completion.take().get();
         } catch (ExecutionException e) {
-          Throwables.propagateIfInstanceOf(e.getCause(), DockerTimeoutException.class);
+          Throwables.throwIfInstanceOf(e.getCause(), DockerTimeoutException.class);
           throw e;
         }
       }
@@ -1723,12 +1774,7 @@ public class DefaultDockerClientTest {
 
     // Wait for container on a thread
     final ExecutorService executorService = Executors.newSingleThreadExecutor();
-    final Future<ContainerExit> exitFuture = executorService.submit(new Callable<ContainerExit>() {
-      @Override
-      public ContainerExit call() throws Exception {
-        return sut.waitContainer(id);
-      }
-    });
+    final Future<ContainerExit> exitFuture = executorService.submit(() -> sut.waitContainer(id));
 
     // Wait for 40 seconds, then kill the container
     Thread.sleep(40000);
@@ -1956,7 +2002,8 @@ public class DefaultDockerClientTest {
 
     final HostConfig.Builder hostConfigBuilder = HostConfig.builder()
         .memory(4194304L)
-        .memorySwap(5000000L);
+        .memorySwap(5000000L)
+        .kernelMemory(5000000L);
 
     if (dockerApiVersionAtLeast("1.20")) {
       hostConfigBuilder.memorySwappiness(42);
@@ -1985,6 +2032,9 @@ public class DefaultDockerClientTest {
     }
     if (dockerApiVersionAtLeast("1.20")) {
       assertThat(actual.memorySwappiness(), equalTo(expected.memorySwappiness()));
+    }
+    if (dockerApiVersionAtLeast("1.21")) {
+      assertThat(actual.kernelMemory(), equalTo(expected.kernelMemory()));
     }
   }
 
@@ -2107,14 +2157,14 @@ public class DefaultDockerClientTest {
     assertThat(newContainerInfo.hostConfig().cpuShares(), is(512L));
   }
 
-  @Test(timeout = 5000)
+  @Test(timeout = 10000)
   public void testEventStream() throws Exception {
     // In this test we open an event stream, do stuff, and check that
     // the events for the stuff we did got pushed over the stream
 
     requireDockerApiVersionNot("1.19", "Docker 1.7.x has a bug that breaks DockerClient.events(). "
                                        + "So we skip this test.");
-    Thread.sleep(1000); // Waiting to ensure event stream has no events from prior tests
+    Thread.sleep(2000); // Waiting to ensure event stream has no events from prior tests
     try (final EventStream eventStream = getImageAndContainerEventStream()) {
 
       final String containerName = randomName();
@@ -2777,12 +2827,10 @@ public class DefaultDockerClientTest {
     assertThat(mounts.size(), equalTo(2));
 
     {
-      final ContainerMount aMount = Iterables.find(mounts, new Predicate<ContainerMount>() {
-        @Override
-        public boolean apply(ContainerMount mount) {
-          return !("nocopy".equals(mount.mode()));
-        }
-      }, null);
+      final ContainerMount aMount = mounts.stream()
+          .filter(mount -> !("nocopy".equals(mount.mode())))
+          .findFirst()
+          .orElse(null);
       assertThat("Could not find a mount (without nocopy)", aMount, notNullValue());
       assertThat(aMount.mode(), is(equalTo("ro")));
       assertThat(aMount.rw(), is(false));
@@ -2791,12 +2839,10 @@ public class DefaultDockerClientTest {
     }
 
     {
-      final ContainerMount nocopyMount = Iterables.find(mounts, new Predicate<ContainerMount>() {
-        @Override
-        public boolean apply(ContainerMount mount) {
-          return "nocopy".equals(mount.mode());
-        }
-      }, null);
+      final ContainerMount nocopyMount = mounts.stream()
+          .filter(mount -> "nocopy".equals(mount.mode()))
+          .findFirst()
+          .orElse(null);
       assertThat("Could not find mount (with nocopy)", nocopyMount, notNullValue());
       assertThat(nocopyMount.mode(), is(equalTo("nocopy")));
       assertThat(nocopyMount.rw(), is(true));
@@ -2853,13 +2899,10 @@ public class DefaultDockerClientTest {
     assertThat(mounts.size(), equalTo(4));
 
     {
-      final ContainerMount bindObjectMount =
-              Iterables.find(mounts, new Predicate<ContainerMount>() {
-                @Override
-                public boolean apply(ContainerMount mount) {
-                  return bindObjectFrom.equals(mount.source());
-                }
-              }, null);
+      final ContainerMount bindObjectMount = mounts.stream()
+          .filter(mount -> bindObjectFrom.equals(mount.source()))
+          .findFirst()
+          .orElse(null);
       assertThat("Did not find mount from bind object", bindObjectMount, notNullValue());
       assertThat(bindObjectMount.source(), is(bindObjectFrom));
       assertThat(bindObjectMount.destination(), is(bindObjectTo));
@@ -2891,13 +2934,10 @@ public class DefaultDockerClientTest {
     }
 
     {
-      final ContainerMount bindStringMount =
-              Iterables.find(mounts, new Predicate<ContainerMount>() {
-                @Override
-                public boolean apply(ContainerMount mount) {
-                  return bindStringFrom.equals(mount.source());
-                }
-              }, null);
+      final ContainerMount bindStringMount = mounts.stream()
+          .filter(mount -> bindStringFrom.equals(mount.source()))
+          .findFirst()
+          .orElse(null);
       assertThat("Did not find mount from bind string", bindStringMount, notNullValue());
       assertThat(bindStringMount.source(), is(equalTo(bindStringFrom)));
       assertThat(bindStringMount.destination(), is(equalTo(bindStringTo)));
@@ -2929,13 +2969,10 @@ public class DefaultDockerClientTest {
     }
 
     {
-      final ContainerMount namedVolumeMount =
-              Iterables.find(mounts, new Predicate<ContainerMount>() {
-                @Override
-                public boolean apply(ContainerMount mount) {
-                  return namedVolumeTo.equals(mount.destination());
-                }
-              }, null);
+      final ContainerMount namedVolumeMount = mounts.stream()
+          .filter(mount -> namedVolumeTo.equals(mount.destination()))
+          .findFirst()
+          .orElse(null);
       assertThat("Did not find mount from named volume", namedVolumeMount, notNullValue());
       assertThat(namedVolumeMount.name(), is(equalTo(namedVolumeName)));
       assertThat(namedVolumeMount.source(), containsString("/" + namedVolumeName + "/"));
@@ -2962,13 +2999,10 @@ public class DefaultDockerClientTest {
     }
 
     {
-      final ContainerMount anonVolumeMount =
-              Iterables.find(mounts, new Predicate<ContainerMount>() {
-                @Override
-                public boolean apply(ContainerMount mount) {
-                  return anonVolumeTo.equals(mount.destination());
-                }
-              }, null);
+      final ContainerMount anonVolumeMount = mounts.stream()
+          .filter(mount -> anonVolumeTo.equals(mount.destination()))
+          .findFirst()
+          .orElse(null);
       assertThat("Did not find mount from anonymous volume", anonVolumeMount, notNullValue());
       assertThat(anonVolumeMount.source(), containsString("/" + anonVolumeMount.name() + "/"));
       assertThat(anonVolumeMount.destination(), is(equalTo(anonVolumeTo)));
@@ -3026,7 +3060,7 @@ public class DefaultDockerClientTest {
 
     final ContainerInfo info = sut.inspectContainer(mountContainer);
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
 
     final String logs;
     try (LogStream stream = sut.logs(info.id(), stdout(), stderr())) {
@@ -3064,7 +3098,7 @@ public class DefaultDockerClientTest {
     sut.waitContainer(volumeContainer);
     final ContainerInfo info = sut.inspectContainer(volumeContainer);
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
   }
 
   @Test
@@ -3153,7 +3187,7 @@ public class DefaultDockerClientTest {
 
     final ContainerInfo info = sut.inspectContainer(container);
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
 
     final String logs;
     try (LogStream stream = sut.logs(info.id(), stdout(false), stderr())) {
@@ -3180,7 +3214,7 @@ public class DefaultDockerClientTest {
 
     final ContainerInfo info = sut.inspectContainer(container);
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
 
     final String logs;
     try (LogStream stream = sut.logs(info.id(), stdout(), stderr(false))) {
@@ -3206,7 +3240,7 @@ public class DefaultDockerClientTest {
 
     final ContainerInfo info = sut.inspectContainer(container);
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
 
     final String logs;
     try (LogStream stream = sut.logs(info.id(), stdout(), stderr(), timestamps())) {
@@ -3235,7 +3269,7 @@ public class DefaultDockerClientTest {
 
     final ContainerInfo info = sut.inspectContainer(container);
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
 
     final String logs;
     try (LogStream stream = sut.logs(info.id(), stdout(), stderr(), tail(2))) {
@@ -3266,7 +3300,7 @@ public class DefaultDockerClientTest {
 
     final ContainerInfo info = sut.inspectContainer(container);
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
 
     final String logs;
     // Get logs since the current timestamp. This should return nothing.
@@ -3299,7 +3333,7 @@ public class DefaultDockerClientTest {
     sut.waitContainer(container);
     final ContainerInfo info = sut.inspectContainer(container);
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
   }
 
   @Test(expected = ContainerNotFoundException.class)
@@ -3503,7 +3537,7 @@ public class DefaultDockerClientTest {
     assertThat(notStarted.id(), is(execId));
     assertThat(notStarted.running(), is(false));
     if (dockerApiVersionLessThan("1.22")) {
-      assertThat(notStarted.exitCode(), is(0));
+      assertThat(notStarted.exitCode(), is(0L));
     } else {
       assertThat(notStarted.exitCode(), nullValue());
     }
@@ -3518,7 +3552,7 @@ public class DefaultDockerClientTest {
     final ExecState started = sut.execInspect(execId);
     assertThat(started.id(), is(execId));
     assertThat(started.running(), is(false));
-    assertThat(started.exitCode(), is(2));
+    assertThat(started.exitCode(), is(2L));
     assertThat(started.openStdin(), is(true));
     assertThat(started.openStderr(), is(true));
     assertThat(started.openStdout(), is(true));
@@ -3984,7 +4018,7 @@ public class DefaultDockerClientTest {
     if (dockerApiVersionEquals("1.24")) {
       // workaround for https://github.com/docker/docker/issues/25735
       networkConfigBuilder = networkConfigBuilder.ipam(
-              Ipam.create("default", Collections.<IpamConfig>emptyList()));
+          Ipam.create("default", Collections.emptyList()));
     }
 
     final NetworkConfig bridgeDriverConfig = networkConfigBuilder.name(randomName())
@@ -4108,9 +4142,9 @@ public class DefaultDockerClientTest {
     final String ip = "172.20.10.1";
     final String dummyAlias = "value-does-not-matter";
     final EndpointConfig endpointConfig = EndpointConfig.builder()
-            .ipamConfig(EndpointIpamConfig.builder().ipv4Address(ip).build())
-            .aliases(ImmutableList.<String>of(dummyAlias))
-            .build();
+        .ipamConfig(EndpointIpamConfig.builder().ipv4Address(ip).build())
+        .aliases(ImmutableList.of(dummyAlias))
+        .build();
 
     final NetworkConnection networkConnection = NetworkConnection.builder()
             .containerId(containerCreation.id())
@@ -4676,9 +4710,9 @@ public class DefaultDockerClientTest {
   public void testStorageOpt() throws Exception {
     requireDockerApiVersionAtLeast("1.24", "StorageOpt");
     requireStorageDriverNotAufs();
-    // Doesn't work on Travis with Docker API v1.32 because storage driver doesn't have pquota
+    // Doesn't work on Travis with Docker API >= v1.32 because storage driver doesn't have pquota
     // mount option enabled.
-    assumeFalse(dockerApiVersionEquals("1.32") && TRAVIS);
+    assumeFalse(dockerApiVersionAtLeast("1.32") && TRAVIS);
     // Pull image
     sut.pull(BUSYBOX_LATEST);
 
@@ -4765,7 +4799,7 @@ public class DefaultDockerClientTest {
         .swarmSpec(SwarmSpec.builder()
             .caConfig(CaConfig.builder().build())
             .dispatcher(DispatcherConfig.builder().build())
-            .labels(Collections.<String, String>emptyMap())
+            .labels(Collections.emptyMap())
             .raft(RaftConfig.builder().build())
             .encryptionConfig(EncryptionConfig.builder().autoLockManagers(true).build())
             .taskDefaults(TaskDefaults.builder().build())
@@ -4807,7 +4841,7 @@ public class DefaultDockerClientTest {
         .build();
 
     final SwarmSpec updatedSpec = SwarmSpec.builder()
-        .name(swarm.swarmSpec().name() + "2")
+        .name("default")
         .labels(newLabels)
         .orchestration(newOrchestration)
         .raft(newRaft)
@@ -4873,9 +4907,9 @@ public class DefaultDockerClientTest {
     assertThat(networkId, is(notNullValue()));
 
     final TaskSpec taskSpec = TaskSpec.builder()
-            .containerSpec(ContainerSpec.builder().image("alpine")
-                    .command(new String[] { "ping", "-c1000", "localhost" }).build())
-            .build();
+        .containerSpec(ContainerSpec.builder().image("alpine")
+            .command("ping", "-c1000", "localhost").build())
+        .build();
 
     final ServiceSpec spec = ServiceSpec.builder().name(serviceName)
             .taskTemplate(taskSpec).mode(ServiceMode.withReplicas(1L))
@@ -4887,14 +4921,10 @@ public class DefaultDockerClientTest {
 
     final Service inspectService = sut.inspectService(serviceName);
     assertThat(inspectService.spec().networks().size(), is(1));
-    assertThat(Iterables.find(inspectService.spec().networks(),
-        new Predicate<NetworkAttachmentConfig>() {
-
-          @Override
-          public boolean apply(NetworkAttachmentConfig config) {
-            return networkId.equals(config.target());
-          }
-        }, null), is(notNullValue()));
+    assertThat(inspectService.spec().networks().stream()
+        .filter(config -> networkId.equals(config.target()))
+        .findFirst()
+        .orElse(null), is(notNullValue()));
 
     sut.removeService(serviceName);
     sut.removeNetwork(networkName);
@@ -5014,12 +5044,16 @@ public class DefaultDockerClientTest {
   public void testCreateServiceWithDefaults() throws Exception {
     requireDockerApiVersionAtLeast("1.24", "swarm support");
 
+    final List<Network> overlayNetworks = sut.listNetworks(ListNetworksParam.withDriver("overlay"));
+    assumeFalse(dockerApiVersionEquals("1.27") && overlayNetworks.isEmpty());
+    final String networkTarget = overlayNetworks.get(0).name();
+
     final String serviceName = randomName();
     final TaskSpec taskSpec = TaskSpec
         .builder()
         .containerSpec(ContainerSpec.builder()
             .image("alpine")
-            .command(new String[] {"ping", "-c1000", "localhost"})
+            .command("ping", "-c1000", "localhost")
             .mounts(Mount.builder()
                 .volumeOptions(VolumeOptions.builder()
                     .driverConfig(com.spotify.docker.client.messages.mount.Driver.builder().build())
@@ -5031,7 +5065,7 @@ public class DefaultDockerClientTest {
         .resources(ResourceRequirements.builder().build())
         .restartPolicy(RestartPolicy.builder().build())
         .placement(Placement.create(null))
-        .networks(NetworkAttachmentConfig.builder().build())
+        .networks(NetworkAttachmentConfig.builder().target(networkTarget).build())
         .logDriver(Driver.builder().build())
         .build();
 
@@ -5044,7 +5078,7 @@ public class DefaultDockerClientTest {
         .taskTemplate(taskSpec)
         .mode(serviceMode)
         .updateConfig(UpdateConfig.create(null, null, null))
-        .networks(Collections.<NetworkAttachmentConfig>emptyList())
+        .networks(Collections.emptyList())
         .endpointSpec(EndpointSpec.builder()
             .addPort(PortConfig.builder().build())
             .build())
@@ -5401,63 +5435,6 @@ public class DefaultDockerClientTest {
   }
 
   @Test
-  public void testInspectTask() throws Exception {
-    requireDockerApiVersionAtLeast("1.24", "swarm support");
-    final Date start = new Date();
-
-    final ServiceSpec serviceSpec = createServiceSpec(randomName());
-    assertThat(sut.listTasks().size(), is(0));
-    final ServiceCreateResponse serviceCreateResponse = sut.createService(serviceSpec);
-    await().until(numberOfTasks(sut), is(greaterThan(0)));
-
-    final Task someTask = sut.listTasks().get(0);
-    final Task inspectedTask = sut.inspectTask(someTask.id());
-    final Date now = new Date();
-    assertThat(inspectedTask.id(), notNullValue());
-    assertThat(inspectedTask.version().index(), allOf(notNullValue(), greaterThan(0L)));
-    assertThat(inspectedTask.createdAt(),
-            allOf(notNullValue(), greaterThanOrEqualTo(start), lessThanOrEqualTo(now)));
-    assertThat(inspectedTask.updatedAt(),
-            allOf(notNullValue(), greaterThanOrEqualTo(start), lessThanOrEqualTo(now)));
-    assertThat(inspectedTask.slot(), allOf(notNullValue(), greaterThan(0)));
-    assertThat(inspectedTask.status(), notNullValue());
-    assertThat(inspectedTask.name(), nullValue());
-    assertEquals(serviceCreateResponse.id(), inspectedTask.serviceId());
-    if (serviceSpec.labels() == null || serviceSpec.labels().isEmpty()) {
-      // Hamcrest has generally bad support for "is null or empty",
-      // and no support at all for empty maps
-      assertTrue(inspectedTask.labels() == null || inspectedTask.labels().isEmpty());
-    } else {
-      assertEquals(serviceSpec.labels(), inspectedTask.labels());
-    }
-    assertThat(inspectedTask.desiredState(), is(anything()));
-    assertThat(inspectedTask.networkAttachments(), is(anything()));
-
-    final TaskSpec taskSpecTemplate = serviceSpec.taskTemplate();
-    final TaskSpec taskSpecActual = inspectedTask.spec();
-    assertEquals(taskSpecTemplate.resources(), taskSpecActual.resources());
-    assertEquals(taskSpecTemplate.restartPolicy(), taskSpecActual.restartPolicy());
-    assertEquals(taskSpecTemplate.placement(), taskSpecActual.placement());
-    assertEquals(taskSpecTemplate.networks(), taskSpecActual.networks());
-    assertEquals(taskSpecTemplate.logDriver(), taskSpecActual.logDriver());
-
-    final ContainerSpec containerSpecTemplate = taskSpecTemplate.containerSpec();
-    final ContainerSpec containerSpecActual = taskSpecActual.containerSpec();
-    assertThat(containerSpecActual.image(),
-            latestImageNameMatcher(containerSpecTemplate.image()));
-    assertEquals(containerSpecTemplate.labels(), containerSpecActual.labels());
-    assertEquals(containerSpecTemplate.command(), containerSpecActual.command());
-    assertEquals(containerSpecTemplate.args(), containerSpecActual.args());
-    assertEquals(containerSpecTemplate.env(), containerSpecActual.env());
-    assertEquals(containerSpecTemplate.dir(), containerSpecActual.dir());
-    assertEquals(containerSpecTemplate.user(), containerSpecActual.user());
-    assertEquals(containerSpecTemplate.groups(), containerSpecActual.groups());
-    assertEquals(containerSpecTemplate.tty(), containerSpecActual.tty());
-    assertEquals(containerSpecTemplate.mounts(), containerSpecActual.mounts());
-    assertEquals(containerSpecTemplate.stopGracePeriod(), containerSpecActual.stopGracePeriod());
-  }
-
-  @Test
   public void testListTasks() throws Exception {
     requireDockerApiVersionAtLeast("1.24", "swarm support");
 
@@ -5475,7 +5452,7 @@ public class DefaultDockerClientTest {
 
     final TaskSpec taskSpec = TaskSpec.builder()
         .containerSpec(ContainerSpec.builder().image("alpine")
-            .command(new String[] { "ping", "-c1000", "localhost" }).build())
+            .command("ping", "-c1000", "localhost").build())
         .build();
 
     final ServiceSpec spec = ServiceSpec.builder()
@@ -5489,37 +5466,6 @@ public class DefaultDockerClientTest {
 
     await().until(numberOfTasks(sut), is(greaterThan(startingNumTasks)));
     sut.listTasks();
-  }
-
-  @Test
-  public void testListTaskWithCriteria() throws Exception {
-    requireDockerApiVersionAtLeast("1.24", "swarm support");
-
-    final ServiceSpec spec = createServiceSpec(randomName());
-    assertThat(sut.listTasks().size(), is(0));
-    sut.createService(spec);
-    await().until(numberOfTasks(sut), is(greaterThan(0)));
-
-    final Task transientTask = sut.listTasks().get(1);
-    await().until(taskState(transientTask.id(), sut), is(transientTask.desiredState()));
-    final Task task = sut.inspectTask(transientTask.id());
-
-    final List<Task> tasksWithId = sut.listTasks(Task.find().taskId(task.id()).build());
-    assertThat(tasksWithId.size(), is(1));
-    assertThat(tasksWithId.get(0), equalTo(task));
-
-    final List<Task> tasksWithServiceName =
-            sut.listTasks(Task.find().serviceName(spec.name()).build());
-    assertThat(tasksWithServiceName.size(), is(greaterThanOrEqualTo(1)));
-    final Set<String> taskIds = Sets.newHashSet(
-            Lists.transform(tasksWithServiceName, new Function<Task, String>() {
-              @Nullable
-              @Override
-              public String apply(@Nullable final Task task) {
-                return task == null ? null : task.id();
-              }
-            }));
-    assertThat(task.id(), isIn(taskIds));
   }
 
   @Test
@@ -5575,7 +5521,7 @@ public class DefaultDockerClientTest {
         .builder()
         .containerSpec(ContainerSpec.builder()
             .image("alpine")
-            .command(new String[] {"ping", "-c1000", "localhost"})
+            .command("ping", "-c1000", "localhost")
             .mounts(Mount.builder()
                 .tmpfsOptions(TmpfsOptions.builder()
                     .sizeBytes(expectedSizeBytes)
@@ -5616,7 +5562,7 @@ public class DefaultDockerClientTest {
     final TaskSpec taskSpec = TaskSpec
         .builder()
         .containerSpec(ContainerSpec.builder().image("alpine")
-                               .command(new String[] {"ping", "-c1000", "localhost"}).build())
+            .command("ping", "-c1000", "localhost").build())
         .build();
 
     final ServiceMode serviceMode = ServiceMode.withReplicas(4);
@@ -5670,67 +5616,49 @@ public class DefaultDockerClientTest {
     final ContainerInfo info = sut.inspectContainer(volumeContainer);
     assertThat(result.toString().contains("Finished"), is(true));
     assertThat(info.state().running(), is(false));
-    assertThat(info.state().exitCode(), is(0));
+    assertThat(info.state().exitCode(), is(0L));
   }
 
   private List<String> containersToIds(final List<Container> containers) {
-    final Function<Container, String> containerToId = new Function<Container, String>() {
-      @Override
-      public String apply(final Container container) {
-        return container.id();
-      }
-    };
-    return Lists.transform(containers, containerToId);
+    return containers.stream().map(Container::id)
+        .collect(Collectors.toList());
   }
 
   private List<String> imagesToShortIds(final List<Image> images) {
-    final Function<Image, String> imageToShortId = new Function<Image, String>() {
-      @Override
-      public String apply(final Image image) {
-        return image.id().substring(0, 12);
-      }
-    };
-    return Lists.transform(images, imageToShortId);
+    return images.stream().map(image -> image.id().substring(0, 12))
+        .collect(Collectors.toList());
   }
 
   private List<String> imagesToShortIdsAndRemoveSha256(final List<Image> images) {
-    final Function<Image, String> imageToShortId = new Function<Image, String>() {
-      @Override
-      public String apply(final Image image) {
-        return image.id().replaceFirst("sha256:", "").substring(0, 12);
-      }
-    };
-    return Lists.transform(images, imageToShortId);
+    return images.stream()
+        .map(image -> image.id().replaceFirst("sha256:", "").substring(0, 12))
+        .collect(Collectors.toList());
   }
 
   private Callable<Boolean> containerIsRunning(final DockerClient client,
                                                final String containerId) {
-    return new Callable<Boolean>() {
-      public Boolean call() throws Exception {
-        try {
-          final ContainerInfo containerInfo = client.inspectContainer(containerId);
-          return containerInfo.state().running();
-        } catch (ContainerNotFoundException ignored) {
-          // Ignore exception. If container is not found, it is not running.
-          return false;
-        }
+    return () -> {
+      try {
+        final ContainerInfo containerInfo = client.inspectContainer(containerId);
+        return containerInfo.state().running();
+      } catch (ContainerNotFoundException ignored) {
+        // Ignore exception. If container is not found, it is not running.
+        return false;
       }
     };
   }
 
   private Callable<Integer> numberOfTasks(final DockerClient client) {
-    return new Callable<Integer>() {
-      public Integer call() throws Exception {
-        return client.listTasks().size();
-      }
-    };
+    return () -> client.listTasks().size();
   }
 
   private Callable<String> taskState(final String taskId,
                                      final DockerClient client) {
-    return new Callable<String>() {
-      public String call() throws Exception {
+    return () -> {
+      try {
         return client.inspectTask(taskId).status().state();
+      } catch (final TaskNotFoundException e) {
+        return "not found";
       }
     };
   }

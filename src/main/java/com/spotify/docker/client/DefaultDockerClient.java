@@ -23,7 +23,6 @@
 
 package com.spotify.docker.client;
 
-import static com.google.common.base.MoreObjects.firstNonNull;
 import static com.google.common.base.Optional.fromNullable;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
@@ -38,7 +37,6 @@ import static javax.ws.rs.HttpMethod.DELETE;
 import static javax.ws.rs.HttpMethod.GET;
 import static javax.ws.rs.HttpMethod.POST;
 import static javax.ws.rs.HttpMethod.PUT;
-import static javax.ws.rs.core.MediaType.APPLICATION_JSON;
 import static javax.ws.rs.core.MediaType.APPLICATION_JSON_TYPE;
 import static javax.ws.rs.core.MediaType.APPLICATION_OCTET_STREAM;
 import static javax.ws.rs.core.MediaType.APPLICATION_OCTET_STREAM_TYPE;
@@ -51,8 +49,10 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.google.common.base.MoreObjects;
 import com.google.common.base.Optional;
 import com.google.common.base.Preconditions;
+import com.google.common.base.Predicates;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.io.CharStreams;
@@ -89,6 +89,7 @@ import com.spotify.docker.client.messages.ContainerExit;
 import com.spotify.docker.client.messages.ContainerInfo;
 import com.spotify.docker.client.messages.ContainerStats;
 import com.spotify.docker.client.messages.ContainerUpdate;
+import com.spotify.docker.client.messages.Distribution;
 import com.spotify.docker.client.messages.ExecCreation;
 import com.spotify.docker.client.messages.ExecState;
 import com.spotify.docker.client.messages.HostConfig;
@@ -127,6 +128,8 @@ import com.spotify.docker.client.messages.swarm.SwarmJoin;
 import com.spotify.docker.client.messages.swarm.SwarmSpec;
 import com.spotify.docker.client.messages.swarm.Task;
 import com.spotify.docker.client.messages.swarm.UnlockKey;
+import com.spotify.docker.client.npipe.NpipeConnectionSocketFactory;
+
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.io.Closeable;
 import java.io.IOException;
@@ -143,6 +146,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -151,7 +155,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.ws.rs.ProcessingException;
@@ -169,16 +177,19 @@ import javax.ws.rs.core.Response;
 
 import org.apache.commons.codec.binary.Base64;
 import org.apache.commons.compress.utils.IOUtils;
+import org.apache.commons.lang.StringUtils;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.config.Registry;
 import org.apache.http.config.RegistryBuilder;
 import org.apache.http.conn.ConnectTimeoutException;
+import org.apache.http.conn.HttpClientConnectionManager;
 import org.apache.http.conn.socket.ConnectionSocketFactory;
 import org.apache.http.conn.socket.PlainConnectionSocketFactory;
 import org.apache.http.conn.ssl.SSLConnectionSocketFactory;
 import org.apache.http.impl.client.CloseableHttpClient;
+import org.apache.http.impl.conn.BasicHttpClientConnectionManager;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.glassfish.hk2.api.MultiException;
 import org.glassfish.jersey.apache.connector.ApacheClientProperties;
@@ -275,9 +286,42 @@ public class DefaultDockerClient implements DockerClient, Closeable {
 
   }
 
+  
+  /**
+   * Hack: this {@link ProgressHandler} is meant to capture the image ID
+   * of an image being built.
+   */
+  private static class BuildProgressHandler implements ProgressHandler {
+
+    private final ProgressHandler delegate;
+
+    private String imageId;
+
+    private BuildProgressHandler(ProgressHandler delegate) {
+      this.delegate = delegate;
+    }
+
+    private String getImageId() {
+      Preconditions.checkState(imageId != null,
+                               "Could not acquire image ID or digest following build");
+      return imageId;
+    }
+
+    @Override
+    public void progress(ProgressMessage message) throws DockerException {
+      delegate.progress(message);
+      
+      final String id = message.buildImageId();
+      if (id != null) {
+        imageId = id;
+      }
+    }
+
+  }
   // ==========================================================================
 
   private static final String UNIX_SCHEME = "unix";
+  private static final String NPIPE_SCHEME = "npipe";
 
   private static final Logger log = LoggerFactory.getLogger(DefaultDockerClient.class);
 
@@ -326,6 +370,10 @@ public class DefaultDockerClient implements DockerClient, Closeable {
 
   private static final GenericType<List<Service>> SERVICE_LIST =
       new GenericType<List<Service>>() {
+      };
+
+  private  static final GenericType<Distribution> DISTRIBUTION =
+      new GenericType<Distribution>(){
       };
 
   private static final GenericType<List<Task>> TASK_LIST = new GenericType<List<Task>>() { };
@@ -398,12 +446,14 @@ public class DefaultDockerClient implements DockerClient, Closeable {
 
     if (originalUri.getScheme().equals(UNIX_SCHEME)) {
       this.uri = UnixConnectionSocketFactory.sanitizeUri(originalUri);
+    } else if (originalUri.getScheme().equals(NPIPE_SCHEME)) {
+      this.uri = NpipeConnectionSocketFactory.sanitizeUri(originalUri);
     } else {
       this.uri = originalUri;
     }
 
-    final PoolingHttpClientConnectionManager cm = getConnectionManager(builder);
-    final PoolingHttpClientConnectionManager noTimeoutCm = getConnectionManager(builder);
+    final HttpClientConnectionManager cm = getConnectionManager(builder);
+    final HttpClientConnectionManager noTimeoutCm = getConnectionManager(builder);
 
     final RequestConfig requestConfig = RequestConfig.custom()
         .setConnectionRequestTimeout((int) builder.connectTimeoutMillis)
@@ -420,6 +470,10 @@ public class DefaultDockerClient implements DockerClient, Closeable {
       this.registryAuthSupplier = new FixedRegistryAuthSupplier();
     } else {
       this.registryAuthSupplier = builder.registryAuthSupplier;
+    }
+    
+    if (builder.getRequestEntityProcessing() != null) {
+      config.property(ClientProperties.REQUEST_ENTITY_PROCESSING, builder.requestEntityProcessing);
     }
 
     this.client = ClientBuilder.newBuilder()
@@ -446,8 +500,10 @@ public class DefaultDockerClient implements DockerClient, Closeable {
       final String proxyHost = System.getProperty("http.proxyHost");
       if (proxyHost != null) {
         boolean skipProxy = false;
-        final String nonProxyHosts = System.getProperty("http.nonProxyHosts");
+        String nonProxyHosts = System.getProperty("http.nonProxyHosts");
         if (nonProxyHosts != null) {
+          // Remove quotes, if any. Refer to https://docs.oracle.com/javase/8/docs/technotes/guides/net/proxies.html
+          nonProxyHosts = StringUtils.strip(nonProxyHosts, "\"");
           String host = getHost();
           for (String nonProxyHost : nonProxyHosts.split("\\|")) {
             if (host.matches(toRegExp(nonProxyHost))) {
@@ -486,15 +542,19 @@ public class DefaultDockerClient implements DockerClient, Closeable {
     return fromNullable(uri.getHost()).or("localhost");
   }
 
-  private PoolingHttpClientConnectionManager getConnectionManager(Builder builder) {
-    final PoolingHttpClientConnectionManager cm =
-        new PoolingHttpClientConnectionManager(getSchemeRegistry(builder));
-
-    // Use all available connections instead of artificially limiting ourselves to 2 per server.
-    cm.setMaxTotal(builder.connectionPoolSize);
-    cm.setDefaultMaxPerRoute(cm.getMaxTotal());
-
-    return cm;
+  private HttpClientConnectionManager getConnectionManager(Builder builder) {
+    if (builder.uri.getScheme().equals(NPIPE_SCHEME)) {
+      final BasicHttpClientConnectionManager bm = 
+          new BasicHttpClientConnectionManager(getSchemeRegistry(builder));
+      return bm;
+    } else {
+      final PoolingHttpClientConnectionManager cm =
+          new PoolingHttpClientConnectionManager(getSchemeRegistry(builder));
+      // Use all available connections instead of artificially limiting ourselves to 2 per server.
+      cm.setMaxTotal(builder.connectionPoolSize);
+      cm.setDefaultMaxPerRoute(cm.getMaxTotal());
+      return cm;
+    }
   }
 
   private Registry<ConnectionSocketFactory> getSchemeRegistry(final Builder builder) {
@@ -513,6 +573,10 @@ public class DefaultDockerClient implements DockerClient, Closeable {
 
     if (builder.uri.getScheme().equals(UNIX_SCHEME)) {
       registryBuilder.register(UNIX_SCHEME, new UnixConnectionSocketFactory(builder.uri));
+    }
+    
+    if (builder.uri.getScheme().equals(NPIPE_SCHEME)) {
+      registryBuilder.register(NPIPE_SCHEME, new NpipeConnectionSocketFactory(builder.uri));
     }
 
     return registryBuilder.build();
@@ -773,6 +837,14 @@ public class DefaultDockerClient implements DockerClient, Closeable {
     queryParameters.add("signal", signal.getName());
 
     containerAction(containerId, "kill", queryParameters);
+  }
+
+  @Override
+  public Distribution getDistribution(String imageName)
+      throws DockerException, InterruptedException {
+    checkNotNull(imageName, "containerName");
+    final WebTarget resource = resource().path("distribution").path(imageName).path("json");
+    return request(GET, DISTRIBUTION, resource, resource.request(APPLICATION_JSON_TYPE));
   }
 
   @Override
@@ -1189,13 +1261,10 @@ public class DefaultDockerClient implements DockerClient, Closeable {
     final CreateProgressHandler createProgressHandler = new CreateProgressHandler(handler);
     final Entity<InputStream> entity = Entity.entity(imagePayload,
                                                      APPLICATION_OCTET_STREAM);
-    try (final ProgressStream load =
-             request(POST, ProgressStream.class, resource,
-                     resource.request(APPLICATION_JSON_TYPE), entity)) {
-      load.tail(createProgressHandler, POST, resource.getUri());
+    try {
+      requestAndTail(POST, createProgressHandler, resource,
+              resource.request(APPLICATION_JSON_TYPE), entity);
       tag(createProgressHandler.getImageId(), image, true);
-    } catch (IOException e) {
-      throw new DockerException(e);
     } finally {
       IOUtils.closeQuietly(imagePayload);
     }
@@ -1273,14 +1342,11 @@ public class DefaultDockerClient implements DockerClient, Closeable {
       resource = resource.queryParam("tag", imageRef.getTag());
     }
 
-    try (ProgressStream pull =
-             request(POST, ProgressStream.class, resource,
-                     resource
-                         .request(APPLICATION_JSON_TYPE)
-                         .header("X-Registry-Auth", authHeader(registryAuth)))) {
-      pull.tail(handler, POST, resource.getUri());
-    } catch (IOException e) {
-      throw new DockerException(e);
+    try {
+      requestAndTail(POST, handler, resource,
+              resource
+                  .request(APPLICATION_JSON_TYPE)
+                  .header("X-Registry-Auth", authHeader(registryAuth)));
     } catch (DockerRequestException e) {
       switch (e.status()) {
         case 404:
@@ -1321,13 +1387,10 @@ public class DefaultDockerClient implements DockerClient, Closeable {
       resource = resource.queryParam("tag", imageRef.getTag());
     }
 
-    try (ProgressStream push =
-             request(POST, ProgressStream.class, resource,
-                     resource.request(APPLICATION_JSON_TYPE)
-                         .header("X-Registry-Auth", authHeader(registryAuth)))) {
-      push.tail(handler, POST, resource.getUri());
-    } catch (IOException e) {
-      throw new DockerException(e);
+    try {
+      requestAndTail(POST, handler, resource,
+              resource.request(APPLICATION_JSON_TYPE)
+                  .header("X-Registry-Auth", authHeader(registryAuth)));
     } catch (DockerRequestException e) {
       switch (e.status()) {
         case 404:
@@ -1424,25 +1487,18 @@ public class DefaultDockerClient implements DockerClient, Closeable {
     // Convert auth to X-Registry-Config format
     final RegistryConfigs registryConfigs = registryAuthSupplier.authForBuild();
 
+    final BuildProgressHandler buildHandler = new BuildProgressHandler(handler);
+
     try (final CompressedDirectory compressedDirectory = CompressedDirectory.create(directory);
-         final InputStream fileStream = Files.newInputStream(compressedDirectory.file());
-         final ProgressStream build =
-             request(POST, ProgressStream.class, resource,
+         final InputStream fileStream = Files.newInputStream(compressedDirectory.file())) {
+        
+      requestAndTail(POST, buildHandler, resource,
                      resource.request(APPLICATION_JSON_TYPE)
                          .header("X-Registry-Config",
                                  authRegistryHeader(registryConfigs)),
-                     Entity.entity(fileStream, "application/tar"))) {
+                     Entity.entity(fileStream, "application/tar"));
 
-      String imageId = null;
-      while (build.hasNextMessage(POST, resource.getUri())) {
-        final ProgressMessage message = build.nextMessage(POST, resource.getUri());
-        final String id = message.buildImageId();
-        if (id != null) {
-          imageId = id;
-        }
-        handler.progress(message);
-      }
-      return imageId;
+      return buildHandler.getImageId();
     }
   }
 
@@ -2679,6 +2735,73 @@ public class DefaultDockerClient implements DockerClient, Closeable {
     }
   }
 
+  private static class ResponseTailReader implements Callable<Void> {
+    private final ProgressStream stream;
+    private final ProgressHandler handler;
+    private final String method;
+    private final WebTarget resource;
+
+    public ResponseTailReader(ProgressStream stream, ProgressHandler handler,
+                              String method, WebTarget resource) {
+      this.stream = stream;
+      this.handler = handler;
+      this.method = method;
+      this.resource = resource;
+    }
+
+    @Override
+    public Void call() throws DockerException, InterruptedException, IOException {
+      stream.tail(handler, method, resource.getUri());
+      return null;
+    }
+  }
+
+  private void tailResponse(final String method, final Response response,
+                            final ProgressHandler handler, final WebTarget resource)
+        throws DockerException, InterruptedException {
+    final ExecutorService executor = Executors.newSingleThreadExecutor();
+    try {
+      final ProgressStream stream = response.readEntity(ProgressStream.class);
+      final Future<?> future = executor.submit(
+              new ResponseTailReader(stream, handler, method, resource));
+      future.get();
+    } catch (ExecutionException e) {
+      final Throwable cause = e.getCause();
+      if (cause instanceof DockerException) {
+        throw (DockerException)cause;
+      } else {
+        throw new DockerException(cause);
+      }
+    } finally {
+      executor.shutdownNow();
+      try {
+        response.close();
+      } catch (ProcessingException e) {
+        // ignore, thrown by jnr-unixsocket when httpcomponent try to read after close
+        // the socket is closed before this exception
+      }
+    }
+  }
+
+  private void requestAndTail(final String method, final ProgressHandler handler,
+                               final WebTarget resource, final Invocation.Builder request,
+                               final Entity<?> entity)
+      throws DockerException, InterruptedException {
+    Response response = request(method, Response.class, resource, request, entity);
+    tailResponse(method, response, handler, resource);
+  }
+  
+  private void requestAndTail(final String method, final ProgressHandler handler,
+                              final WebTarget resource, final Invocation.Builder request)
+      throws DockerException, InterruptedException {
+    Response response = request(method, Response.class, resource, request);
+    if (response.getStatusInfo().getFamily() != Response.Status.Family.SUCCESSFUL) {
+      throw new DockerRequestException(method, resource.getUri(), response.getStatus(),
+                message(response), null);
+    }
+    tailResponse(method, response, handler, resource);
+  }
+
   private Invocation.Builder headers(final Invocation.Builder request) {
     final Set<Map.Entry<String, Object>> entries = headers.entrySet();
 
@@ -2811,8 +2934,11 @@ public class DefaultDockerClient implements DockerClient, Closeable {
    */
   public static Builder fromEnv() throws DockerCertificateException {
     final String endpoint = DockerHost.endpointFromEnv();
-    final Path dockerCertPath = Paths.get(firstNonNull(DockerHost.certPathFromEnv(),
-                                                       DockerHost.defaultCertPath()));
+    final Path dockerCertPath = Paths.get(Iterables.find(
+        Arrays.asList(DockerHost.certPathFromEnv(),
+            DockerHost.configPathFromEnv(),
+            DockerHost.defaultCertPath()),
+        Predicates.notNull()));
 
     final Builder builder = new Builder();
 
@@ -2820,6 +2946,8 @@ public class DefaultDockerClient implements DockerClient, Closeable {
         .dockerCertPath(dockerCertPath).build();
 
     if (endpoint.startsWith(UNIX_SCHEME + "://")) {
+      builder.uri(endpoint);
+    } else if (endpoint.startsWith(NPIPE_SCHEME + "://")) {
       builder.uri(endpoint);
     } else {
       final String stripped = endpoint.replaceAll(".*://", "");
@@ -2857,6 +2985,7 @@ public class DefaultDockerClient implements DockerClient, Closeable {
     private RegistryAuth registryAuth;
     private RegistryAuthSupplier registryAuthSupplier;
     private Map<String, Object> headers = new HashMap<>();
+    private RequestEntityProcessing requestEntityProcessing;
 
     public URI uri() {
       return uri;
@@ -3039,16 +3168,29 @@ public class DefaultDockerClient implements DockerClient, Closeable {
     public Map<String, Object> headers() {
       return headers;
     }
+    
+    /**
+     * Allows setting transfer encoding. CHUNKED does not send the content-length header 
+     * while BUFFERED does.
+     * 
+     * <p>By default ApacheConnectorProvider uses CHUNKED mode. Some Docker API end-points 
+     * seems to fail when no content-length is specified but a body is sent.
+     * 
+     * @param requestEntityProcessing is the requested entity processing to use when calling docker
+     *     daemon (tcp protocol).
+     * @return Builder
+     */
+    public Builder useRequestEntityProcessing(
+        final RequestEntityProcessing requestEntityProcessing) {
+      this.requestEntityProcessing = requestEntityProcessing;
+      return this;
+    }
+    
+    public RequestEntityProcessing getRequestEntityProcessing() {
+      return this.requestEntityProcessing;
+    }
 
     public DefaultDockerClient build() {
-      if (dockerAuth && registryAuthSupplier == null && registryAuth == null) {
-        try {
-          registryAuth(RegistryAuth.fromDockerConfig().build());
-        } catch (IOException e) {
-          log.warn("Unable to use Docker auth info", e);
-        }
-      }
-
       // read the docker config file for auth info if nothing else was specified
       if (registryAuthSupplier == null) {
         registryAuthSupplier(new ConfigFileRegistryAuthSupplier());
