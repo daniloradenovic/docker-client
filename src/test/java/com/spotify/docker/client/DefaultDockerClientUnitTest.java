@@ -21,6 +21,11 @@
 package com.spotify.docker.client;
 
 import static com.spotify.docker.FixtureUtil.fixture;
+import static com.spotify.hamcrest.jackson.JsonMatchers.jsonArray;
+import static com.spotify.hamcrest.jackson.JsonMatchers.jsonObject;
+import static com.spotify.hamcrest.jackson.JsonMatchers.jsonText;
+import static com.spotify.hamcrest.pojo.IsPojo.pojo;
+import static java.util.Collections.singletonList;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -50,12 +55,12 @@ import com.google.common.io.Resources;
 import com.spotify.docker.client.DockerClient.Signal;
 import com.spotify.docker.client.auth.RegistryAuthSupplier;
 import com.spotify.docker.client.exceptions.ConflictException;
-import com.spotify.docker.client.exceptions.DockerCertificateException;
 import com.spotify.docker.client.exceptions.DockerException;
 import com.spotify.docker.client.exceptions.NodeNotFoundException;
 import com.spotify.docker.client.exceptions.NonSwarmNodeException;
 import com.spotify.docker.client.exceptions.NotFoundException;
 import com.spotify.docker.client.messages.ContainerConfig;
+import com.spotify.docker.client.messages.Distribution;
 import com.spotify.docker.client.messages.HostConfig;
 import com.spotify.docker.client.messages.HostConfig.Bind;
 import com.spotify.docker.client.messages.RegistryAuth;
@@ -75,14 +80,19 @@ import com.spotify.docker.client.messages.swarm.NodeInfo;
 import com.spotify.docker.client.messages.swarm.NodeSpec;
 import com.spotify.docker.client.messages.swarm.Placement;
 import com.spotify.docker.client.messages.swarm.Preference;
+import com.spotify.docker.client.messages.swarm.ResourceRequirements;
 import com.spotify.docker.client.messages.swarm.Service;
 import com.spotify.docker.client.messages.swarm.ServiceSpec;
 import com.spotify.docker.client.messages.swarm.Spread;
 import com.spotify.docker.client.messages.swarm.SwarmJoin;
+import com.spotify.docker.client.messages.swarm.Task;
 import com.spotify.docker.client.messages.swarm.TaskSpec;
+import com.spotify.docker.client.messages.swarm.Version;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.sql.Date;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -93,6 +103,8 @@ import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
 import okhttp3.mockwebserver.RecordedRequest;
 import okio.Buffer;
+
+import org.glassfish.jersey.client.RequestEntityProcessing;
 import org.glassfish.jersey.internal.util.Base64;
 import org.junit.After;
 import org.junit.Before;
@@ -178,7 +190,7 @@ public class DefaultDockerClientUnitTest {
       System.setProperty("http.proxyPort", "80");
       final DefaultDockerClient client = DefaultDockerClient.builder()
               .uri("https://192.168.53.103:2375").build();
-      assertThat((String) client.getClient().getConfiguration()
+      assertThat(client.getClient().getConfiguration()
                       .getProperty("jersey.config.client.proxy.uri"),
               equalTo("http://gmodules.com:80"));
     } finally {
@@ -192,12 +204,27 @@ public class DefaultDockerClientUnitTest {
     try {
       System.setProperty("http.proxyHost", "gmodules.com");
       System.setProperty("http.proxyPort", "80");
-      System.setProperty("http.nonProxyHosts", "127.0.0.1|localhost|192.168.*");
-      final DefaultDockerClient client = DefaultDockerClient.builder()
-              .uri("https://192.168.53.103:2375").build();
-      assertThat((String) client.getClient().getConfiguration()
-                      .getProperty("jersey.config.client.proxy.uri"),
-              isEmptyOrNullString());
+      final String nonProxyHostsPropertyValue = "127.0.0.1|localhost|192.168.*";
+      final List<String> nonProxyHostsPropertyValues = Arrays.asList(
+              nonProxyHostsPropertyValue, "\"" + nonProxyHostsPropertyValue + "\"");
+      for (String value : nonProxyHostsPropertyValues) {
+        System.setProperty("http.nonProxyHosts", value);
+        final DefaultDockerClient client = DefaultDockerClient.builder()
+                .uri("https://192.168.53.103:2375").build();
+        assertThat((String) client.getClient().getConfiguration()
+                        .getProperty("jersey.config.client.proxy.uri"),
+                isEmptyOrNullString());
+        final DefaultDockerClient client1 = DefaultDockerClient.builder()
+                .uri("https://127.0.0.1:2375").build();
+        assertThat((String) client1.getClient().getConfiguration()
+                        .getProperty("jersey.config.client.proxy.uri"),
+                isEmptyOrNullString());
+        final DefaultDockerClient client2 = DefaultDockerClient.builder()
+                .uri("https://localhost:2375").build();
+        assertThat((String) client2.getClient().getConfiguration()
+                        .getProperty("jersey.config.client.proxy.uri"),
+                isEmptyOrNullString());
+      }
     } finally {
       System.clearProperty("http.proxyHost");
       System.clearProperty("http.proxyPort");
@@ -235,16 +262,45 @@ public class DefaultDockerClientUnitTest {
     return ObjectMapperProvider.objectMapper().readTree(buffer.inputStream());
   }
 
+  private static JsonNode toJson(final String string) throws IOException {
+    return ObjectMapperProvider.objectMapper().readTree(string);
+  }
+
   private static JsonNode toJson(byte[] bytes) throws IOException {
     return ObjectMapperProvider.objectMapper().readTree(bytes);
   }
 
-  private static JsonNode toJson(Object object) throws IOException {
+  private static JsonNode toJson(Object object) {
     return ObjectMapperProvider.objectMapper().valueToTree(object);
   }
 
   private static ObjectNode createObjectNode() {
     return ObjectMapperProvider.objectMapper().createObjectNode();
+  }
+  
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testGroupAdd() throws Exception {
+    final DefaultDockerClient dockerClient = new DefaultDockerClient(builder);
+
+    final HostConfig hostConfig = HostConfig.builder()
+        .groupAdd("63", "65")
+        .build();
+
+    final ContainerConfig containerConfig = ContainerConfig.builder()
+        .hostConfig(hostConfig)
+        .build();
+
+    server.enqueue(new MockResponse());
+
+    dockerClient.createContainer(containerConfig);
+
+    final RecordedRequest recordedRequest = takeRequestImmediately();
+
+    final JsonNode groupAdd = toJson(recordedRequest.getBody()).get("HostConfig").get("GroupAdd");
+    assertThat(groupAdd.isArray(), is(true));
+
+    assertThat(childrenTextNodes((ArrayNode) groupAdd), containsInAnyOrder("63", "65"));
   }
 
   @Test
@@ -272,13 +328,11 @@ public class DefaultDockerClientUnitTest {
 
     assertThat(recordedRequest.getHeader("Content-Type"), is("application/json"));
 
-    // TODO (mbrown): use hamcrest-jackson for this, once we upgrade to Java 8
     final JsonNode requestJson = toJson(recordedRequest.getBody());
-
-    final JsonNode capAddNode = requestJson.get("HostConfig").get("CapAdd");
-    assertThat(capAddNode.isArray(), is(true));
-
-    assertThat(childrenTextNodes((ArrayNode) capAddNode), containsInAnyOrder("baz", "qux"));
+    assertThat(requestJson, is(jsonObject()
+        .where("HostConfig", is(jsonObject()
+            .where("CapAdd", is(jsonArray(
+                containsInAnyOrder(jsonText("baz"), jsonText("qux")))))))));
   }
 
   private static Set<String> childrenTextNodes(ArrayNode arrayNode) {
@@ -295,8 +349,7 @@ public class DefaultDockerClientUnitTest {
 
   @Test
   @SuppressWarnings("deprecated")
-  public void buildThrowsIfRegistryAuthandRegistryAuthSupplierAreBothSpecified()
-      throws DockerCertificateException {
+  public void buildThrowsIfRegistryAuthandRegistryAuthSupplierAreBothSpecified() {
     thrown.expect(IllegalStateException.class);
     thrown.expectMessage("LOGIC ERROR");
 
@@ -336,9 +389,12 @@ public class DefaultDockerClientUnitTest {
     // build() calls /version to check what format of header to send
     enqueueServerApiVersion("1.20");
 
-    // TODO (mbrown): what to return for build response?
     server.enqueue(new MockResponse()
-        .setResponseCode(200)
+            .setResponseCode(200)
+            .addHeader("Content-Type", "application/json")
+            .setBody(
+                fixture("fixtures/1.22/build.json")
+            )
     );
 
     final Path path = Paths.get(Resources.getResource("dockerDirectory").toURI());
@@ -570,14 +626,13 @@ public class DefaultDockerClientUnitTest {
     SwarmJoin swarmJoin = SwarmJoin.builder()
             .joinToken("token_foo")
             .listenAddr("0.0.0.0:2377")
-            .remoteAddrs(Arrays.asList("10.0.0.10:2377"))
+            .remoteAddrs(singletonList("10.0.0.10:2377"))
             .build();
 
     dockerClient.joinSwarm(swarmJoin);
   }
 
-  private void enqueueServerApiError(final int statusCode, final String message)
-      throws IOException {
+  private void enqueueServerApiError(final int statusCode, final String message) {
     final ObjectNode errorMessage = createObjectNode()
         .put("message", message);
 
@@ -1134,6 +1189,161 @@ public class DefaultDockerClientUnitTest {
         "baz", "qux"
     )));
   }
+  
+  @Test
+  public void testBufferedRequestEntityProcessing() throws Exception {
+    builder.useRequestEntityProcessing(RequestEntityProcessing.BUFFERED);
+    final DefaultDockerClient dockerClient = new DefaultDockerClient(builder);
+    
+    final HostConfig hostConfig = HostConfig.builder().build();
+
+    final ContainerConfig containerConfig = ContainerConfig.builder()
+        .hostConfig(hostConfig)
+        .build();
+
+    server.enqueue(new MockResponse());
+
+    dockerClient.createContainer(containerConfig);
+
+    final RecordedRequest recordedRequest = takeRequestImmediately();
+
+    assertThat(recordedRequest.getHeader("Content-Length"), notNullValue());
+    assertThat(recordedRequest.getHeader("Transfer-Encoding"), nullValue());
+  }
+  
+  @Test
+  public void testChunkedRequestEntityProcessing() throws Exception {
+    builder.useRequestEntityProcessing(RequestEntityProcessing.CHUNKED);
+    final DefaultDockerClient dockerClient = new DefaultDockerClient(builder);
+    
+    final HostConfig hostConfig = HostConfig.builder().build();
+
+    final ContainerConfig containerConfig = ContainerConfig.builder()
+        .hostConfig(hostConfig)
+        .build();
+
+    server.enqueue(new MockResponse());
+
+    dockerClient.createContainer(containerConfig);
+
+    final RecordedRequest recordedRequest = takeRequestImmediately();
+
+    assertThat(recordedRequest.getHeader("Content-Length"), nullValue());
+    assertThat(recordedRequest.getHeader("Transfer-Encoding"), is("chunked"));
+  }
+
+  @Test
+  public void testGetDistribution() throws Exception {
+    final DefaultDockerClient dockerClient = new DefaultDockerClient(builder);
+
+    server.enqueue(new MockResponse()
+        .setResponseCode(200)
+        .addHeader("Content-Type", "application/json")
+        .setBody(
+          fixture("fixtures/1.30/distribution.json")
+        )
+    );
+    final Distribution distribution = dockerClient.getDistribution("my-image");
+    assertThat(distribution, notNullValue());
+    assertThat(distribution.platforms().size(), is(1));
+    assertThat(distribution.platforms().get(0).architecture(), is("amd64"));
+    assertThat(distribution.platforms().get(0).os(), is("linux"));
+    assertThat(distribution.platforms().get(0).osVersion(), is(""));
+    assertThat(distribution.platforms().get(0).variant(), is(""));
+    assertThat(distribution.descriptor().size(), is(3987495L));
+    assertThat(distribution.descriptor().digest(), is(
+        "sha256:c0537ff6a5218ef531ece93d4984efc99bbf3f7497c0a7726c88e2bb7584dc96"));
+    assertThat(distribution.descriptor().mediaType(), is(
+        "application/vnd.docker.distribution.manifest.v2+json"
+    ));
+    assertThat(distribution.platforms().get(0).osFeatures(), is(ImmutableList.of(
+        "feature1", "feature2"
+    )));
+    assertThat(distribution.platforms().get(0).features(), is(ImmutableList.of(
+        "feature1", "feature2"
+    )));
+    assertThat(distribution.descriptor().urls(), is(ImmutableList.of(
+        "url1", "url2"
+    )));
+  }
+
+  @Test
+  public void testInspectTask() throws Exception {
+    final DefaultDockerClient dockerClient = new DefaultDockerClient(builder);
+
+    enqueueServerApiVersion("1.24");
+    enqueueServerApiResponse(200, "fixtures/1.24/task.json");
+
+    final Task task = dockerClient.inspectTask("0kzzo1i0y4jz6027t0k7aezc7");
+
+    assertThat(task, is(pojo(Task.class)
+        .where("id", is("0kzzo1i0y4jz6027t0k7aezc7"))
+        .where("version", is(pojo(Version.class)
+            .where("index", is(71L))
+        ))
+        .where("createdAt", is(Date.from(Instant.parse("2016-06-07T21:07:31.171892745Z"))))
+        .where("updatedAt", is(Date.from(Instant.parse("2016-06-07T21:07:31.376370513Z"))))
+        .where("spec", is(pojo(TaskSpec.class)
+            .where("containerSpec", is(pojo(ContainerSpec.class)
+                .where("image", is("redis"))
+            ))
+            .where("resources", is(pojo(ResourceRequirements.class)
+                .where("limits",
+                    is(pojo(com.spotify.docker.client.messages.swarm.Resources.class)))
+                .where("reservations",
+                    is(pojo(com.spotify.docker.client.messages.swarm.Resources.class)))
+            ))
+        ))
+    ));
+  }
+
+
+  @Test
+  public void testListTaskWithCriteria() throws Exception {
+    final DefaultDockerClient dockerClient = new DefaultDockerClient(builder);
+
+    enqueueServerApiVersion("1.24");
+    enqueueServerApiResponse(200, "fixtures/1.24/tasks.json");
+    final List<Task> tasks = dockerClient.listTasks();
+    // Throw away the first request that gets the docker server version
+    takeRequestImmediately();
+    final RecordedRequest recordedRequest = takeRequestImmediately();
+    assertThat(recordedRequest.getRequestUrl().querySize(), is(0));
+    assertThat(tasks, contains(
+        pojo(Task.class)
+            .where("id", is("0kzzo1i0y4jz6027t0k7aezc7")),
+        pojo(Task.class)
+            .where("id", is("1yljwbmlr8er2waf8orvqpwms"))
+    ));
+
+    enqueueServerApiVersion("1.24");
+    enqueueServerApiResponse(200, "fixtures/1.24/tasks.json");
+    final String taskId = "task-1";
+    dockerClient.listTasks(Task.find().taskId(taskId).build());
+    takeRequestImmediately();
+    final RecordedRequest recordedRequest2 = takeRequestImmediately();
+    final HttpUrl requestUrl2 = recordedRequest2.getRequestUrl();
+    assertThat(requestUrl2.querySize(), is(1));
+    final JsonNode requestJson2 =
+        toJson(recordedRequest2.getRequestUrl().queryParameter("filters"));
+    assertThat(requestJson2, is(jsonObject()
+        .where("id", is(jsonArray(
+            contains(jsonText(taskId)))))));
+
+    enqueueServerApiVersion("1.24");
+    enqueueServerApiResponse(200, "fixtures/1.24/tasks.json");
+    final String serviceName = "service-1";
+    dockerClient.listTasks(Task.find().serviceName(serviceName).build());
+    takeRequestImmediately();
+    final RecordedRequest recordedRequest3 = takeRequestImmediately();
+    final HttpUrl requestUrl3 = recordedRequest3.getRequestUrl();
+    assertThat(requestUrl3.querySize(), is(1));
+    final JsonNode requestJson3 =
+        toJson(recordedRequest3.getRequestUrl().queryParameter("filters"));
+    assertThat(requestJson3, is(jsonObject()
+        .where("service", is(jsonArray(
+            contains(jsonText(serviceName)))))));
+  }
 
   private void enqueueServerApiResponse(final int statusCode, final String fileName)
       throws IOException {
@@ -1146,8 +1356,7 @@ public class DefaultDockerClientUnitTest {
     );
   }
 
-  private void enqueueServerApiResponse(final int statusCode, final ObjectNode objectResponse)
-      throws IOException {
+  private void enqueueServerApiResponse(final int statusCode, final ObjectNode objectResponse) {
     server.enqueue(new MockResponse()
         .setResponseCode(statusCode)
         .addHeader("Content-Type", "application/json")
@@ -1157,7 +1366,7 @@ public class DefaultDockerClientUnitTest {
     );
   }
 
-  private void enqueueServerApiVersion(final String apiVersion) throws IOException {
+  private void enqueueServerApiVersion(final String apiVersion) {
     enqueueServerApiResponse(200,
         createObjectNode()
             .put("ApiVersion", apiVersion)

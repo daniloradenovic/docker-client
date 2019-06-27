@@ -1,5 +1,85 @@
 # Changelog
 
+## 8.15.0
+
+Released January 16, 2019
+
+- Upgrade jackson deps to from 2.9.6 to latest 2.9.8 ([1132][])
+- Relocate remaining packages that are included in shaded jar ([1111][])
+
+[1132]: https://github.com/spotify/docker-client/pull/1132
+[1111]: https://github.com/spotify/docker-client/pull/1111
+
+## 8.14.5
+
+- Support for Windows 10 Docker named pipes ([875][])
+
+[875]: https://github.com/spotify/docker-client/pull/875
+
+## 8.14.0
+
+Released October 4, 2018
+
+- Change maven-compiler-plugin source and target from 1.7 to 1.8 to prepare for Java 8.
+  JAR should still be compatible with JRE 1.7.
+- Updates to allow docker-client to function on Java 9+ ([1068][])
+
+[1068]: https://github.com/spotify/docker-client/pull/1068
+
+## 8.13.0
+
+Released August 29, 2018
+
+- Make ContainExit.exitCode(), HealthLog.exitCode() and ExecState.exitCode() return a Long instead
+ of Integer.
+- Add support for `runtime` in HostConfig
+
+## 8.12.0
+
+Released August 26, 2018
+
+- Make ContainerState.exitCode() return a Long instead of Integer ([1052][])
+- Refactor authentication with docker config.json file ([1051][])
+    - Add support for `credsHelper` (Fixes [1037][])
+    - Improve support for authenticating with multiple registries (Fixes [1042][])
+
+[1037]: https://github.com/spotify/docker-client/issues/1037
+[1042]: https://github.com/spotify/docker-client/issues/1042
+[1051]: https://github.com/spotify/docker-client/issues/1051
+[1052]: https://github.com/spotify/docker-client/issues/1052
+
+## 8.11.6
+
+Released Jun 2, 2018
+
+- Make TaskStatus.containerStatus nullable ([1005][])
+- Support getting image information via /distribution
+- Support EC key spec algorithm ([887][])
+- Allow setting up DockerClientBuilder with RequestEntityProcessing
+
+[1005]: https://github.com/spotify/docker-client/issues/1005
+[887]: https://github.com/spotify/docker-client/issues/887
+
+## 8.11.5
+
+Released May 28, 2018
+
+- Support interrupting pull, push, build, and create
+
+## 8.11.4
+
+Released May 23, 2018
+
+- Fix DockerConfigReader when ~/.docker/config.json has no auths
+
+## 8.11.3
+
+Released May 20, 2018
+
+- Add support for Service placement preferences
+- Allow attaching to a not started container
+- Fix for #978: Docker client does not honour the -Dhttp.nonProxyHosts
+
 ## 8.11.2
 
 Released March 14, 2018

@@ -43,12 +43,10 @@ import java.util.Set;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.ext.ContextResolver;
-import javax.ws.rs.ext.Provider;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-@Provider
 @Produces(MediaType.APPLICATION_JSON)
 @SuppressWarnings({"rawtypes", "unchecked"})
 public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
@@ -75,7 +73,6 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
       OBJECT_MAPPER.registerModule(MODULE);
       OBJECT_MAPPER.configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
       OBJECT_MAPPER.setSerializationInclusion(JsonInclude.Include.NON_NULL);
-      OBJECT_MAPPER.setDateFormat(new DockerDateFormat());
     } catch (Throwable t) {
       log.error("Failure during static initialization", t);
       throw t;

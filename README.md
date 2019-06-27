@@ -21,8 +21,8 @@ It is used in many critical production systems at Spotify.
 
 ## Version compatibility
 docker-client is built and tested against the six most recent minor releases of Docker.
-Right now these are 1.12.6 - 17.09.0-ce (specifically the ones [here][1]).
-We upload the artifact tested on Docker 1.13.1.
+Right now these are 17.03.1~ce - 17.12.1~ce (specifically the ones [here][1]).
+We upload the artifact tested on Docker 17.12.1~ce.
 See [Docker docs on the mapping between Docker version and API version][3].
 
 ## Download
@@ -104,7 +104,7 @@ If you're looking for how to build and develop it, keep reading.
 
 ## Prerequisites
 
-docker-client should be buildable on any platform with Docker 1.6+, JDK7+, and a recent version of
+docker-client should be buildable on any platform with Docker 1.6+, JDK8+, and a recent version of
 Maven 3.
 
 ### A note on using Docker for Mac
@@ -125,7 +125,7 @@ Make sure Docker daemon is running and that you can do `docker ps`.
 
 You can run tests on their own with `mvn test`. Note that the tests start and stop a large number of
 containers, so the list of containers you see with `docker ps -a` will start to get pretty long
-after many test runs. You may find it helpful to occassionally issue `docker rm $(docker ps -aq)`.
+after many test runs. You may find it helpful to occasionally issue `docker rm $(docker ps -aq)`.
 
 ## Releasing
 
