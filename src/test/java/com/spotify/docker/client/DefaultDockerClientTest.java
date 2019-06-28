@@ -244,6 +244,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
@@ -270,7 +271,6 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.http.impl.conn.PoolingHttpClientConnectionManager;
 import org.apache.http.pool.PoolStats;
 import org.glassfish.jersey.apache.connector.ApacheClientProperties;
-import org.glassfish.jersey.internal.util.Base64;
 import org.hamcrest.CustomTypeSafeMatcher;
 import org.hamcrest.Matcher;
 import org.hamcrest.Matchers;
@@ -1048,7 +1048,7 @@ public class DefaultDockerClientTest {
           if (!started.isDone()) {
             started.set(true);
           }
-        });
+        }, BuildParam.noCache());
       } catch (InterruptedException e) {
         interrupted.set(true);
         throw e;
@@ -4974,7 +4974,7 @@ public class DefaultDockerClientTest {
     }
     assertThat(sut.listSecrets().size(), equalTo(0));
 
-    final String secretData = Base64.encodeAsString("testdata".getBytes());
+    final String secretData = Base64.getEncoder().encodeToString("testdata".getBytes());
     
     final Map<String, String> labels = ImmutableMap.of("foo", "bar", "1", "a");
 
@@ -5143,7 +5143,7 @@ public class DefaultDockerClientTest {
     }
     assertThat(sut.listSecrets().size(), equalTo(0));
 
-    final String secretData = Base64.encodeAsString("testdata".getBytes());
+    final String secretData = Base64.getEncoder().encodeToString("testdata".getBytes());
 
     final Map<String, String> labels = ImmutableMap.of("foo", "bar", "1", "a");
 
@@ -5553,38 +5553,6 @@ public class DefaultDockerClientTest {
     }
   }
 
-  @Test
-  public void testReadingStdout() throws DockerException, InterruptedException {
-
-    // pull image
-    sut.pull(BUSYBOX_LATEST);
-
-    // create container
-    final ContainerConfig config = ContainerConfig.builder()
-        .image(BUSYBOX_LATEST)
-        .cmd("echo", "helloworld")
-        .build();
-
-    final ContainerCreation creation = sut.createContainer(config, randomName());
-    String id = creation.id();
-
-    // start and wait to finish
-    sut.startContainer(id);
-    sut.waitContainer(id);
-
-    // LogStream.readFully() can (falsely) return an empty String in ~0.1% of
-    // the cases, therefore a higher number of attempts
-    for (int i = 0; i < 10000; i++) {
-      LogStream logStream = sut.logs(id, DockerClient.LogsParam.stdout());
-      String result = logStream.readFully();
-      System.out.println(i + "-" + result);
-      logStream.close();
-      assertThat(result, not(isEmptyString()));;
-    }
-
-    // cleanup
-    sut.removeContainer(id);
-  }
 
   private ServiceSpec createServiceSpec(final String serviceName) {
     return this.createServiceSpec(serviceName, new HashMap<String, String>());
